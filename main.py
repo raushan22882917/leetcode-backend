@@ -53,7 +53,7 @@ class ScrapeRequest(BaseModel):
     username: str
 
 def get_chrome_driver():
-    """Create and configure Chrome WebDriver"""
+    """Create and configure Chrome WebDriver with fallback handling"""
     try:
         chrome_options = Options()
         chrome_options.add_argument("--headless")  # Run in background
@@ -89,12 +89,13 @@ def get_chrome_driver():
         
         return driver
     except Exception as e:
-        print(f"Error creating Chrome driver: {e}")
-        raise
+        print(f"Chrome driver not available: {e}")
+        print("Falling back to requests-only scraping...")
+        return None
 
 def scrape_leetcode_profile(username: str) -> ProfileData:
     """
-    Scrape LeetCode profile data using Selenium for dynamic content
+    Scrape LeetCode profile data using Selenium for dynamic content with fallback to requests
     """
     profile_data = ProfileData(
         name="",
@@ -118,33 +119,38 @@ def scrape_leetcode_profile(username: str) -> ProfileData:
     
     driver = None
     try:
-        # Initialize Chrome driver
+        # Try to initialize Chrome driver
         driver = get_chrome_driver()
         
-        # Navigate to the profile page
-        url = f"https://leetcode.com/u/{username}/"
-        driver.get(url)
-        
-        # Wait for page to load
-        wait = WebDriverWait(driver, 10)
-        
-        # Wait for profile content to load
-        try:
-            wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-            time.sleep(3)  # Additional wait for dynamic content
-        except:
-            pass
-        
-        # Get page source and parse with BeautifulSoup
-        page_source = driver.page_source
-        soup = BeautifulSoup(page_source, 'html.parser')
-        
-        # Extract profile data using Selenium selectors
-        profile_data = extract_profile_with_selenium(driver, soup, username)
-        
-        # If we didn't get data with Selenium, try BeautifulSoup parsing
-        if not profile_data.name and not profile_data.rank:
-            profile_data = extract_from_html(soup, username)
+        if driver:
+            # Use Selenium for dynamic content
+            url = f"https://leetcode.com/u/{username}/"
+            driver.get(url)
+            
+            # Wait for page to load
+            wait = WebDriverWait(driver, 10)
+            
+            # Wait for profile content to load
+            try:
+                wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                time.sleep(3)  # Additional wait for dynamic content
+            except:
+                pass
+            
+            # Get page source and parse with BeautifulSoup
+            page_source = driver.page_source
+            soup = BeautifulSoup(page_source, 'html.parser')
+            
+            # Extract profile data using Selenium selectors
+            profile_data = extract_profile_with_selenium(driver, soup, username)
+            
+            # If we didn't get data with Selenium, try BeautifulSoup parsing
+            if not profile_data.name and not profile_data.rank:
+                profile_data = extract_from_html(soup, username)
+        else:
+            # Fallback to requests-only approach
+            print("Using requests-only scraping approach...")
+            profile_data = scrape_with_requests_only(username)
         
         # If still no data, try GraphQL API
         if not profile_data.name and not profile_data.rank:
@@ -166,6 +172,76 @@ def scrape_leetcode_profile(username: str) -> ProfileData:
                 driver.quit()
             except:
                 pass
+
+def scrape_with_requests_only(username: str) -> ProfileData:
+    """Scrape LeetCode profile using only requests and BeautifulSoup (fallback method)"""
+    profile_data = ProfileData(
+        name="",
+        username=username,
+        rank="",
+        avatar_url="",
+        skills=[],
+        contest_rating=None,
+        global_ranking=None,
+        contests_attended=None,
+        problems_solved=None,
+        acceptance_rate=None,
+        easy_problems=None,
+        medium_problems=None,
+        hard_problems=None,
+        problems_attempting=None,
+        submissions_past_year=None,
+        total_active_days=None,
+        max_streak=None
+    )
+    
+    try:
+        # Headers to mimic a real browser
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        }
+        
+        # Try to get the profile page
+        url = f"https://leetcode.com/u/{username}/"
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        # Parse with BeautifulSoup
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Extract profile data from HTML
+        profile_data = extract_from_html(soup, username)
+        
+        # If we still don't have data, try to find JSON data in script tags
+        if not profile_data.name and not profile_data.rank:
+            script_tags = soup.find_all('script')
+            for script in script_tags:
+                if script.string and 'profile' in script.string.lower():
+                    try:
+                        # Try to extract JSON data from script tags
+                        script_content = script.string
+                        if 'window.__INITIAL_STATE__' in script_content:
+                            # Extract JSON data
+                            start = script_content.find('{')
+                            end = script_content.rfind('}') + 1
+                            if start != -1 and end != -1:
+                                json_str = script_content[start:end]
+                                data = json.loads(json_str)
+                                profile_data = extract_from_json_data(data, username)
+                                if profile_data.name or profile_data.rank:
+                                    break
+                    except (json.JSONDecodeError, KeyError, TypeError):
+                        continue
+        
+    except Exception as e:
+        print(f"Error in requests-only scraping: {e}")
+    
+    return profile_data
 
 def extract_profile_with_selenium(driver, soup, username):
     """Extract profile data using Selenium WebDriver"""
@@ -817,29 +893,62 @@ async def test_scrape(username: str):
     driver = None
     try:
         driver = get_chrome_driver()
-        url = f"https://leetcode.com/u/{username}/"
-        driver.get(url)
         
-        # Wait for page to load
-        time.sleep(5)
-        
-        page_source = driver.page_source
-        soup = BeautifulSoup(page_source, 'html.parser')
-        
-        return {
-            "url": url,
-            "page_title": driver.title,
-            "content_length": len(page_source),
-            "has_script_tags": len(soup.find_all('script')),
-            "page_loaded": "body" in page_source.lower(),
-            "profile_elements_found": {
-                "name_elements": len(driver.find_elements(By.CSS_SELECTOR, 'div[class*="text-label-1"]')),
-                "avatar_elements": len(driver.find_elements(By.CSS_SELECTOR, 'img[alt*="Avatar"]')),
-                "rank_elements": len(driver.find_elements(By.CSS_SELECTOR, 'span[class*="rank"]')),
-                "github_links": len(driver.find_elements(By.CSS_SELECTOR, 'a[href*="github.com"]')),
-                "linkedin_links": len(driver.find_elements(By.CSS_SELECTOR, 'a[href*="linkedin.com"]'))
+        if driver:
+            url = f"https://leetcode.com/u/{username}/"
+            driver.get(url)
+            
+            # Wait for page to load
+            time.sleep(5)
+            
+            page_source = driver.page_source
+            soup = BeautifulSoup(page_source, 'html.parser')
+            
+            return {
+                "method": "selenium",
+                "url": url,
+                "page_title": driver.title,
+                "content_length": len(page_source),
+                "has_script_tags": len(soup.find_all('script')),
+                "page_loaded": "body" in page_source.lower(),
+                "profile_elements_found": {
+                    "name_elements": len(driver.find_elements(By.CSS_SELECTOR, 'div[class*="text-label-1"]')),
+                    "avatar_elements": len(driver.find_elements(By.CSS_SELECTOR, 'img[alt*="Avatar"]')),
+                    "rank_elements": len(driver.find_elements(By.CSS_SELECTOR, 'span[class*="rank"]')),
+                    "github_links": len(driver.find_elements(By.CSS_SELECTOR, 'a[href*="github.com"]')),
+                    "linkedin_links": len(driver.find_elements(By.CSS_SELECTOR, 'a[href*="linkedin.com"]'))
+                }
             }
-        }
+        else:
+            # Test requests-only approach
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            }
+            
+            url = f"https://leetcode.com/u/{username}/"
+            response = requests.get(url, headers=headers, timeout=10)
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            return {
+                "method": "requests_only",
+                "url": url,
+                "status_code": response.status_code,
+                "content_length": len(response.content),
+                "has_script_tags": len(soup.find_all('script')),
+                "page_loaded": "body" in response.text.lower(),
+                "profile_elements_found": {
+                    "name_elements": len(soup.select('div[class*="text-label-1"]')),
+                    "avatar_elements": len(soup.select('img[alt*="Avatar"]')),
+                    "rank_elements": len(soup.select('span[class*="rank"]')),
+                    "github_links": len(soup.select('a[href*="github.com"]')),
+                    "linkedin_links": len(soup.select('a[href*="linkedin.com"]'))
+                }
+            }
     except Exception as e:
         return {"error": str(e)}
     finally:
